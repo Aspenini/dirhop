@@ -12,65 +12,90 @@
 #include <termios.h>
 #include <unistd.h>
 
-static const char ENTER_SCREEN[] = "\033[?1049h\033[?7l\033[?25l\033[H";
+/* Autowrap is off so a full-width line cannot scroll the screen. */
+static const char ENTER_SCREEN[] = "\033[?1049h\033[?7l\033[?25l\033[H\033[2J";
 static const char LEAVE_SCREEN[] = "\033[0m\033[?25h\033[?7h\033[?1049l";
 
+/* How long the bytes after Esc may trail it and still form one key. Arrow
+   keys arrive as Esc [ A; over ssh the tail can lag the Esc slightly, and
+   reading it as a bare Esc would quit. */
+#define ESC_WAIT_MS 50
+
 static int tty_fd = -1;
+static int wake_fd[2] = {-1, -1};
 static struct termios orig_tios;
-static int have_tios;
-static volatile sig_atomic_t raw_on;
-static volatile sig_atomic_t exit_sig;
+static int raw_on;
 static int saw_eof;
+static volatile sig_atomic_t exit_sig;
+static volatile sig_atomic_t got_cont;
+
+static unsigned char inbuf[64];
+static size_t in_pos;
+static size_t in_len;
+
+/* Signal handlers only set a flag and write one byte to a pipe. poll()
+   watches the pipe beside the terminal, so a resize that lands between two
+   poll() calls is never lost. */
+static void wake(void)
+{
+    int saved = errno;
+    ssize_t r;
+
+    if (wake_fd[1] >= 0) {
+        r = write(wake_fd[1], "", 1);
+        (void)r;
+    }
+    errno = saved;
+}
 
 static void on_winch(int sig)
 {
     (void)sig;
+    wake();
+}
+
+static void on_cont(int sig)
+{
+    (void)sig;
+    got_cont = 1;
+    wake();
 }
 
 static void on_fatal(int sig)
 {
     exit_sig = sig;
+    wake();
 }
 
-/* Stop restores the terminal before the process actually suspends, then
-   rebuilds the screen after SIGCONT. SIGTSTP is blocked inside the handler,
-   so it has to be unblocked or raise() only queues the signal. */
-static void on_tstp(int sig)
+static int set_flags(int fd)
 {
-    int saved = errno;
-    struct sigaction sa;
-    struct sigaction old;
-    sigset_t set;
-    sigset_t oldset;
+    int fl = fcntl(fd, F_GETFL);
+    int fdfl = fcntl(fd, F_GETFD);
 
-    (void)sig;
-    term_leave();
-
-    memset(&sa, 0, sizeof sa);
-    sa.sa_handler = SIG_DFL;
-    sigemptyset(&sa.sa_mask);
-    sigaction(SIGTSTP, &sa, &old);
-
-    sigemptyset(&set);
-    sigaddset(&set, SIGTSTP);
-    sigprocmask(SIG_UNBLOCK, &set, &oldset);
-    raise(SIGTSTP);
-    sigprocmask(SIG_SETMASK, &oldset, NULL);
-
-    sigaction(SIGTSTP, &old, NULL);
-    term_enter();
-    errno = saved;
+    if (fl < 0 || fdfl < 0)
+        return -1;
+    if (fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
+        return -1;
+    return fcntl(fd, F_SETFD, fdfl | FD_CLOEXEC);
 }
 
-static void install_signals(void)
+static int install_signals(void)
 {
     struct sigaction sa;
 
+    if (pipe(wake_fd) != 0)
+        return -1;
+    if (set_flags(wake_fd[0]) != 0 || set_flags(wake_fd[1]) != 0)
+        return -1;
+
     memset(&sa, 0, sizeof sa);
     sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART;
 
     sa.sa_handler = on_winch;
     sigaction(SIGWINCH, &sa, NULL);
+    sa.sa_handler = on_cont;
+    sigaction(SIGCONT, &sa, NULL);
 
     sa.sa_handler = on_fatal;
     sigaction(SIGINT, &sa, NULL);
@@ -78,20 +103,23 @@ static void install_signals(void)
     sigaction(SIGHUP, &sa, NULL);
     sigaction(SIGQUIT, &sa, NULL);
 
-    sa.sa_handler = on_tstp;
+    /* The shell waits on this process while it captures stdout. A stopped
+       dho could not be resumed from that shell, so suspend is refused. Raw
+       mode turns off ISIG, so Ctrl-C and Ctrl-Z arrive as bytes anyway;
+       these cover signals sent from elsewhere. */
+    sa.sa_handler = SIG_IGN;
     sigaction(SIGTSTP, &sa, NULL);
-
-    /* A shell function captures stdout, so this process is not always the
-       foreground job. Ignoring these lets /dev/tty reads and writes proceed
-       instead of stopping the process. */
-    signal(SIGTTIN, SIG_IGN);
-    signal(SIGTTOU, SIG_IGN);
-    signal(SIGPIPE, SIG_IGN);
+    sigaction(SIGTTIN, &sa, NULL);
+    sigaction(SIGTTOU, &sa, NULL);
+    sigaction(SIGPIPE, &sa, NULL);
+    return 0;
 }
 
 int term_open(void)
 {
-    tty_fd = open("/dev/tty", O_RDWR | O_CLOEXEC);
+    pid_t fg;
+
+    tty_fd = open("/dev/tty", O_RDWR | O_NOCTTY | O_CLOEXEC);
     if (tty_fd < 0) {
         fprintf(stderr, DIRHOP_BIN ": cannot open /dev/tty: %s\n", strerror(errno));
         return -1;
@@ -99,31 +127,47 @@ int term_open(void)
     if (tcgetattr(tty_fd, &orig_tios) != 0) {
         fprintf(stderr, DIRHOP_BIN ": cannot read terminal settings: %s\n",
                 strerror(errno));
-        close(tty_fd);
-        tty_fd = -1;
-        return -1;
+        goto fail;
     }
-    have_tios = 1;
-    install_signals();
+    /* A background process cannot read the terminal. Its reads fail or stop
+       it, which looks like dho quitting at once or hanging. Say why. */
+    fg = tcgetpgrp(tty_fd);
+    if (fg != -1 && fg != getpgrp()) {
+        fprintf(stderr, DIRHOP_BIN ": not in the terminal's foreground job; "
+                        "run it directly or through the shell function\n");
+        goto fail;
+    }
+    if (install_signals() != 0) {
+        fprintf(stderr, DIRHOP_BIN ": %s\n", strerror(errno));
+        goto fail;
+    }
     return 0;
+
+fail:
+    close(tty_fd);
+    tty_fd = -1;
+    return -1;
+}
+
+static void apply_raw(void)
+{
+    struct termios raw = orig_tios;
+
+    raw.c_iflag &= ~(tcflag_t)(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+    raw.c_oflag &= ~(tcflag_t)OPOST;
+    raw.c_cflag |= CS8;
+    raw.c_lflag &= ~(tcflag_t)(ECHO | ICANON | IEXTEN | ISIG);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    tcsetattr(tty_fd, TCSANOW, &raw);
+    write_all(tty_fd, ENTER_SCREEN, sizeof ENTER_SCREEN - 1);
 }
 
 void term_enter(void)
 {
-    struct termios raw;
-
-    if (tty_fd < 0 || !have_tios || raw_on)
+    if (tty_fd < 0 || raw_on)
         return;
-    raw = orig_tios;
-    raw.c_iflag &= ~(tcflag_t)(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-    raw.c_oflag &= ~(tcflag_t)OPOST;
-    raw.c_cflag |= CS8;
-    raw.c_lflag &= ~(tcflag_t)(ECHO | ICANON | IEXTEN);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    tcsetattr(tty_fd, TCSAFLUSH, &raw);
-    /* Autowrap is off so a full-width line cannot scroll the screen. */
-    write_all(tty_fd, ENTER_SCREEN, sizeof ENTER_SCREEN - 1);
+    apply_raw();
     raw_on = 1;
 }
 
@@ -132,8 +176,7 @@ void term_leave(void)
     if (tty_fd < 0 || !raw_on)
         return;
     write_all(tty_fd, LEAVE_SCREEN, sizeof LEAVE_SCREEN - 1);
-    if (have_tios)
-        tcsetattr(tty_fd, TCSADRAIN, &orig_tios);
+    tcsetattr(tty_fd, TCSADRAIN, &orig_tios);
     raw_on = 0;
 }
 
@@ -168,120 +211,191 @@ int term_fatal_signal(void)
     return (int)exit_sig;
 }
 
+static void drain_wake(void)
+{
+    char sink[32];
+
+    while (read(wake_fd[0], sink, sizeof sink) > 0)
+        ;
+    /* After SIGSTOP and SIGCONT the shell may have reset the terminal. */
+    if (got_cont) {
+        got_cont = 0;
+        if (raw_on)
+            apply_raw();
+    }
+}
+
+/* Returns 1 when the terminal has input, 0 on timeout, and -1 when a
+   signal or a hangup should end the wait. An untimed wait also returns -1
+   on a resize so the screen is redrawn. A timed wait is gathering the rest
+   of an escape sequence, so it keeps going and the redraw follows the key. */
 static int wait_input(int timeout_ms)
 {
     for (;;) {
-        struct pollfd pfd;
+        struct pollfd p[2];
+        int woke = 0;
         int r;
 
         if (exit_sig || saw_eof)
-            return 0;
-        pfd.fd = tty_fd;
-        pfd.events = POLLIN;
-        r = poll(&pfd, 1, timeout_ms);
+            return -1;
+        p[0].fd = tty_fd;
+        p[0].events = POLLIN;
+        p[0].revents = 0;
+        p[1].fd = wake_fd[0];
+        p[1].events = POLLIN;
+        p[1].revents = 0;
+        r = poll(p, 2, timeout_ms);
         if (r < 0) {
-            if (errno == EINTR) {
-                if (exit_sig)
-                    return 0;
-                /* A short wait is gathering an escape sequence. Restart it
-                   so a resize does not turn an arrow key into Esc. An infinite
-                   wait returns so the screen can be drawn at the new size. */
-                if (timeout_ms < 0)
-                    return 0;
+            if (errno == EINTR)
                 continue;
-            }
             saw_eof = 1;
-            return 0;
+            return -1;
         }
         if (r == 0)
             return 0;
-        if ((pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) &&
-            !(pfd.revents & POLLIN)) {
-            saw_eof = 1;
-            return 0;
+        if (p[1].revents) {
+            drain_wake();
+            woke = 1;
         }
-        return 1;
-    }
-}
-
-static int read_byte(char *out)
-{
-    for (;;) {
-        ssize_t n = read(tty_fd, out, 1);
-        if (n == 1)
+        if (exit_sig)
+            return -1;
+        if (p[0].revents & POLLIN)
             return 1;
-        if (n == 0) {
+        if (p[0].revents & (POLLERR | POLLHUP | POLLNVAL)) {
             saw_eof = 1;
-            return 0;
+            return -1;
         }
-        if (errno == EINTR) {
-            if (exit_sig)
-                return 0;
-            continue;
-        }
-        saw_eof = 1;
-        return 0;
+        if (woke && timeout_ms < 0)
+            return -1;
     }
 }
 
+/* Returns 1 with a byte, 0 on timeout, or -1 as wait_input() does. */
+static int next_byte(int timeout_ms, unsigned char *out)
+{
+    if (in_pos == in_len) {
+        ssize_t n;
+        int r = wait_input(timeout_ms);
+
+        if (r <= 0)
+            return r;
+        do
+            n = read(tty_fd, inbuf, sizeof inbuf);
+        while (n < 0 && errno == EINTR);
+        if (n <= 0) {
+            saw_eof = 1;
+            return -1;
+        }
+        in_pos = 0;
+        in_len = (size_t)n;
+    }
+    *out = inbuf[in_pos++];
+    return 1;
+}
+
+static int map_final(unsigned char f, int param)
+{
+    switch (f) {
+    case 'A':
+        return KEY_UP;
+    case 'B':
+        return KEY_DOWN;
+    case 'C':
+        return KEY_RIGHT;
+    case 'D':
+        return KEY_LEFT;
+    case 'H':
+        return KEY_HOME;
+    case 'F':
+        return KEY_END;
+    case '~':
+        switch (param) {
+        case 1:
+        case 7:
+            return KEY_HOME;
+        case 4:
+        case 8:
+            return KEY_END;
+        case 5:
+            return KEY_PGUP;
+        case 6:
+            return KEY_PGDN;
+        }
+        break;
+    }
+    return KEY_NONE;
+}
+
+/* Called after Esc. Recognises CSI (Esc [) and SS3 (Esc O) keys, with or
+   without modifier parameters. Anything else after Esc is an Alt chord and
+   is ignored. */
 static int read_escape(void)
 {
-    char seq[16];
-    int n = 0;
+    unsigned char c;
+    int param = 0;
+    int in_first = 1;
+    int i;
+    int r;
 
-    if (!wait_input(30))
+    r = next_byte(ESC_WAIT_MS, &c);
+    if (r == 0)
         return KEY_ESC;
-    if (!read_byte(&seq[0]))
+    if (r < 0)
+        return KEY_NONE;
+    if (c == '\033')
         return KEY_ESC;
-    n = 1;
-    if (seq[0] != '[' && seq[0] != 'O')
+    if (c == 'O') {
+        if (next_byte(ESC_WAIT_MS, &c) <= 0)
+            return KEY_NONE;
+        return map_final(c, 0);
+    }
+    if (c != '[')
         return KEY_NONE;
 
-    while (n < (int)sizeof seq) {
-        char c;
-        if (!wait_input(15))
-            break;
-        if (!read_byte(&seq[n]))
-            break;
-        c = seq[n++];
-        if (seq[0] == 'O')
-            break;
-        if ((unsigned char)c >= 0x40)
-            break;
-    }
-    if (n >= 2) {
-        char f = seq[n - 1];
-        if (f == 'A')
-            return KEY_UP;
-        if (f == 'B')
-            return KEY_DOWN;
-        if (f == 'C')
-            return KEY_RIGHT;
-        if (f == 'D')
-            return KEY_LEFT;
+    for (i = 0; i < 32; i++) {
+        if (next_byte(ESC_WAIT_MS, &c) <= 0)
+            return KEY_NONE;
+        if (c >= '0' && c <= '9') {
+            if (in_first && param < 1000)
+                param = param * 10 + (c - '0');
+        } else if (c == ';') {
+            in_first = 0;
+        } else if (c >= 0x40 && c <= 0x7e) {
+            return map_final(c, param);
+        } else if (c < 0x20 || c > 0x3f) {
+            return KEY_NONE;
+        }
     }
     return KEY_NONE;
 }
 
 int term_read_key(int *ch)
 {
-    char c;
+    unsigned char c;
 
     *ch = 0;
-    if (exit_sig || saw_eof)
+    if (next_byte(-1, &c) <= 0)
         return KEY_NONE;
-    if (!wait_input(-1))
-        return KEY_NONE;
-    if (!read_byte(&c))
-        return KEY_NONE;
-    if (c == '\033')
+    switch (c) {
+    case '\033':
         return read_escape();
-    if (c == '\r' || c == '\n')
+    case '\r':
+    case '\n':
         return KEY_ENTER;
-    if (c == 0x7f || c == 0x08)
+    case 0x7f:
+    case 0x08:
         return KEY_BACKSPACE;
-    if ((unsigned char)c < 0x20 || (unsigned char)c >= 0x80)
+    case 0x03:
+        return KEY_CTRL_C;
+    case 0x0c:
+        return KEY_CTRL_L;
+    case 0x0e:
+        return KEY_DOWN;
+    case 0x10:
+        return KEY_UP;
+    }
+    if (c < 0x20 || c >= 0x7f)
         return KEY_NONE;
-    *ch = (unsigned char)c;
+    *ch = c;
     return KEY_CHAR;
 }

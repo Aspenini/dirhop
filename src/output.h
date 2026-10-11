@@ -3,8 +3,8 @@
 
 #include "config.h"
 
-/* Writes the confirmed path to stdout. A terminal gets a trailing newline.
-   A pipe gets a trailing NUL so a name can contain newlines. Returns 0, or -1. */
-int output_path(const char *path);
+/* Writes the confirmed path to stdout, followed by a newline, or by a NUL
+   when nul is set. Returns 0, or -1. */
+int output_path(const char *path, int nul);
 
 #endif

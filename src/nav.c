@@ -27,7 +27,9 @@ void browser_clear(Browser *b)
     b->path = NULL;
     b->selected = -1;
     b->scroll = 0;
+    b->page = 0;
     b->show_hidden = 0;
+    b->unreadable = 0;
     b->has_status = 0;
     b->status[0] = '\0';
 }
@@ -40,20 +42,18 @@ void browser_status(Browser *b, const char *msg)
     b->has_status = 1;
 }
 
-void browser_status_errno(Browser *b, int err)
+/* The error comes first so a long name cannot push it off a narrow line. */
+void browser_status_errno(Browser *b, int err, const char *name)
 {
     const char *s = strerror(err);
-    char buf[160];
-    size_t n;
 
-    if (!s)
+    if (!s || !s[0])
         s = "error";
-    n = strlen(s);
-    if (n >= sizeof buf)
-        n = sizeof buf - 1;
-    memcpy(buf, s, n);
-    buf[n] = '\0';
-    browser_status(b, buf);
+    if (name && name[0])
+        snprintf(b->status, sizeof b->status, "%s: %s", s, name);
+    else
+        snprintf(b->status, sizeof b->status, "%s", s);
+    b->has_status = 1;
 }
 
 void browser_clear_status(Browser *b)
@@ -119,17 +119,40 @@ static int browser_load(Browser *b, const char *path)
         return -1;
     scan_free(&b->dirs);
     b->dirs = fresh;
+    b->unreadable = 0;
     browser_rebuild(b);
     return 0;
 }
 
 int browser_rescan(Browser *b)
 {
-    if (browser_load(b, b->path) != 0)
+    if (browser_load(b, b->path) != 0) {
+        if (b->dirs.count == 0)
+            b->unreadable = 1;
         return -1;
+    }
     /* A non-empty listing always has a selection. */
     if (b->selected < 0)
         b->selected = b->visible_count ? 0 : -1;
+    return 0;
+}
+
+int browser_refresh(Browser *b)
+{
+    char *saved = NULL;
+    int fallback = b->selected;
+    int err;
+
+    if (b->selected >= 0 && (size_t)b->selected < b->visible_count)
+        saved = xstrdup(browser_name_at(b, (size_t)b->selected));
+    if (browser_load(b, b->path) != 0) {
+        err = errno;
+        free(saved);
+        browser_status_errno(b, err, NULL);
+        return -1;
+    }
+    browser_reselect(b, saved, fallback);
+    free(saved);
     return 0;
 }
 
@@ -151,6 +174,7 @@ void browser_ensure_visible(Browser *b, int list_rows)
 
     if (list_rows < 1)
         list_rows = 1;
+    b->page = list_rows;
     if (b->selected < 0 || b->visible_count == 0) {
         b->scroll = 0;
         return;
@@ -169,16 +193,16 @@ void browser_ensure_visible(Browser *b, int list_rows)
 
 void browser_move(Browser *b, int delta)
 {
-    int next;
+    long long next;
 
     if (b->visible_count == 0 || b->selected < 0)
         return;
-    next = b->selected + delta;
+    next = (long long)b->selected + delta;
     if (next < 0)
         next = 0;
-    if ((size_t)next >= b->visible_count)
-        next = (int)b->visible_count - 1;
-    b->selected = next;
+    if ((unsigned long long)next >= b->visible_count)
+        next = (long long)b->visible_count - 1;
+    b->selected = (int)next;
 }
 
 int browser_descend(Browser *b)
@@ -189,7 +213,7 @@ int browser_descend(Browser *b)
         return 0;
     next = browser_selected_path(b);
     if (browser_load(b, next) != 0) {
-        browser_status_errno(b, errno);
+        browser_status_errno(b, errno, path_base(next));
         free(next);
         return -1;
     }
@@ -214,7 +238,7 @@ int browser_ascend(Browser *b)
         return 1;
     }
     if (browser_load(b, parent) != 0) {
-        browser_status_errno(b, errno);
+        browser_status_errno(b, errno, parent);
         free(parent);
         free(saved);
         return -1;

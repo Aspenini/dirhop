@@ -448,8 +448,8 @@ static void draw_status(Buf *b, const Browser *browser, int row, int budget)
 static const char *footer_move(void)
 {
     if (utf8_mode)
-        return " \xe2\x86\x91\xe2\x86\x93 Move   Space Open   Enter CD";
-    return " UpDn Move  Space Open   Enter CD";
+        return " \xe2\x86\x91\xe2\x86\x93 Move   Space Open   Enter CD   . CD here";
+    return " UpDn Move  Space Open   Enter CD   . CD here";
 }
 
 static const char *footer_back(int show_hidden)
@@ -487,7 +487,10 @@ void ui_draw(Browser *browser)
     int i;
 
     term_winsize(&rows, &cols);
-    frame.len = 0;
+    buf_clear(&frame);
+    /* Synchronized output: terminals that know mode 2026 show the frame at
+       once, and the rest ignore it. */
+    buf_puts(&frame, "\033[?2026h");
 
     if (rows >= 6) {
         show_rules = 1;
@@ -523,15 +526,11 @@ void ui_draw(Browser *browser)
     for (i = 0; i < list_rows; i++) {
         int rr = r + i;
         int budget = row_budget(rr, rows, cols);
-        size_t idx;
+        size_t idx = (size_t)browser->scroll + (size_t)i;
 
-        if (browser->scroll < 0)
-            idx = (size_t)i;
-        else
-            idx = (size_t)browser->scroll + (size_t)i;
         if (browser->visible_count == 0 && i == 0) {
             draw_message_row(&frame, rr, budget,
-                             browser->has_status ? "  (unreadable)" : "  (empty)");
+                             browser->unreadable ? "  (unreadable)" : "  (empty)");
         } else if (idx < browser->visible_count) {
             draw_entry(&frame, browser, rr, budget, idx,
                        browser->selected == (int)idx);
@@ -565,7 +564,6 @@ void ui_draw(Browser *browser)
         begin_line(&frame, r);
         r++;
     }
-    buf_puts(&frame, "\033[H");
-    if (frame.len)
-        term_write(frame.data, frame.len);
+    buf_puts(&frame, "\033[H\033[?2026l");
+    term_write(frame.data, frame.len);
 }

@@ -57,16 +57,49 @@ static unsigned char fold_ascii(unsigned char c)
     return c;
 }
 
+static int is_digit(unsigned char c)
+{
+    return c >= '0' && c <= '9';
+}
+
+/* Case-insensitive natural order: digit runs compare by value, so "v2"
+   sorts before "v10". Ties fall back to bytes so the order is total. */
 static int cmp_names(const char *a, const char *b)
 {
     const unsigned char *ua = (const unsigned char *)a;
     const unsigned char *ub = (const unsigned char *)b;
 
     while (*ua && *ub) {
-        unsigned char ca = fold_ascii(*ua);
-        unsigned char cb = fold_ascii(*ub);
-        if (ca != cb)
-            return ca < cb ? -1 : 1;
+        if (is_digit(*ua) && is_digit(*ub)) {
+            const unsigned char *ea;
+            const unsigned char *eb;
+            size_t la;
+            size_t lb;
+
+            while (*ua == '0' && is_digit(ua[1]))
+                ua++;
+            while (*ub == '0' && is_digit(ub[1]))
+                ub++;
+            for (ea = ua; is_digit(*ea); ea++)
+                ;
+            for (eb = ub; is_digit(*eb); eb++)
+                ;
+            la = (size_t)(ea - ua);
+            lb = (size_t)(eb - ub);
+            if (la != lb)
+                return la < lb ? -1 : 1;
+            for (; ua < ea; ua++, ub++) {
+                if (*ua != *ub)
+                    return *ua < *ub ? -1 : 1;
+            }
+            continue;
+        }
+        {
+            unsigned char ca = fold_ascii(*ua);
+            unsigned char cb = fold_ascii(*ub);
+            if (ca != cb)
+                return ca < cb ? -1 : 1;
+        }
         ua++;
         ub++;
     }

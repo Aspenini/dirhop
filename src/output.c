@@ -5,14 +5,11 @@
 #include <string.h>
 #include <unistd.h>
 
-int output_path(const char *path)
+int output_path(const char *path, int nul)
 {
     size_t n = strlen(path);
-    int tty = isatty(STDOUT_FILENO);
 
     if (write_all(STDOUT_FILENO, path, n) != 0)
         return -1;
-    if (tty)
-        return write_all(STDOUT_FILENO, "\n", 1);
-    return write_all(STDOUT_FILENO, "\0", 1);
+    return write_all(STDOUT_FILENO, nul ? "\0" : "\n", 1);
 }
