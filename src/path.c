@@ -5,11 +5,43 @@
 #include <errno.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
+
+static char *path_normalize_abs(const char *input);
+
+/* $PWD keeps the path the shell used to get here, symlinks included. It is
+   used when it is absolute, has no "." or ".." parts, and names the same
+   directory as ".", which is what pwd -L checks. */
+static char *logical_cwd(void)
+{
+    const char *pwd = getenv("PWD");
+    const char *s;
+    struct stat a;
+    struct stat b;
+
+    if (!pwd || pwd[0] != '/')
+        return NULL;
+    for (s = pwd; *s; s++) {
+        if (s[0] == '/' && s[1] == '.' &&
+            (s[2] == '/' || s[2] == '\0' ||
+             (s[2] == '.' && (s[3] == '/' || s[3] == '\0'))))
+            return NULL;
+    }
+    if (stat(pwd, &a) != 0 || stat(".", &b) != 0)
+        return NULL;
+    if (a.st_dev != b.st_dev || a.st_ino != b.st_ino)
+        return NULL;
+    return path_normalize_abs(pwd);
+}
 
 char *path_getcwd(void)
 {
     size_t n = 256;
+    char *logical = logical_cwd();
+
+    if (logical)
+        return logical;
 
     for (;;) {
         char *buf = malloc(n);
@@ -84,26 +116,35 @@ const char *path_base(const char *path)
 
 char *path_normalize(const char *input)
 {
+    char *cwd;
     char *raw;
-    char **parts;
-    size_t cap = 16;
-    size_t n = 0;
-    char *s;
     char *out;
 
     if (!input || !input[0]) {
         errno = EINVAL;
         return NULL;
     }
-    if (input[0] == '/') {
-        raw = xstrdup(input);
-    } else {
-        char *cwd = path_getcwd();
-        if (!cwd)
-            return NULL;
-        raw = path_join(cwd, input);
-        free(cwd);
-    }
+    if (input[0] == '/')
+        return path_normalize_abs(input);
+    cwd = path_getcwd();
+    if (!cwd)
+        return NULL;
+    raw = path_join(cwd, input);
+    free(cwd);
+    out = path_normalize_abs(raw);
+    free(raw);
+    return out;
+}
+
+/* Collapses "//", "." and ".." in an absolute path, textually. */
+static char *path_normalize_abs(const char *input)
+{
+    char *raw = xstrdup(input);
+    char **parts;
+    size_t cap = 16;
+    size_t n = 0;
+    char *s;
+    char *out;
 
     parts = malloc(cap * sizeof *parts);
     if (!parts)

@@ -1,46 +1,26 @@
 # dirhop — bash and zsh integration.
-# Source this file. The `dho` binary must be on PATH.
+# Source this file from ~/.bashrc or ~/.zshrc. The `dho` binary must be on PATH.
 #
-# The binary writes a NUL-terminated absolute path. That keeps directory
-# names which contain newlines intact. Quitting writes nothing; the read
-# fails and the function returns non-zero without calling cd.
+# The binary runs in a command substitution, which keeps it in the
+# terminal's foreground job in both shells. A process substitution does not:
+# zsh starts one in the background, where it cannot read the keyboard.
+#
+# Quitting writes nothing and exits non-zero, so cd is skipped. The trailing
+# "x" stops the substitution from eating a newline at the end of a name.
 
-if [ -n "${BASH_VERSION-}" ] && [ "${BASH_SOURCE[0]-}" = "$0" ]; then
-    echo "dho: source this file from bash or zsh" >&2
-    exit 1
-fi
-
-if [ -n "${ZSH_VERSION-}" ]; then
-    case ${ZSH_EVAL_CONTEXT-} in
-        toplevel)
-            echo "dho: source this file from bash or zsh" >&2
-            exit 1
+dho() {
+    [ -n "${ZSH_VERSION-}" ] && emulate -L zsh
+    local target
+    case ${1-} in
+        -h | --help | -V | --version)
+            command dho "$@"
+            return
             ;;
     esac
-fi
-
-if [ -n "${ZSH_VERSION-}" ]; then
-    dho() {
-        emulate -L zsh
-        local target
-        if ! IFS= read -r -d '' target < <(command dho "$PWD" </dev/tty); then
-            return 1
-        fi
-        if [ -n "$target" ]; then
-            builtin cd -- "$target" || return
-        fi
-    }
-elif [ -n "${BASH_VERSION-}" ]; then
-    dho() {
-        local target
-        if ! IFS= read -r -d '' target < <(command dho "$PWD" </dev/tty); then
-            return 1
-        fi
-        if [ -n "$target" ]; then
-            builtin cd -- "$target" || return
-        fi
-    }
-else
-    echo "dho: source this file from bash or zsh" >&2
-    return 1
-fi
+    target=$(command dho "$@" && printf x) || return
+    target=${target%x}
+    target=${target%$'\n'}
+    if [ -n "$target" ] && [ "$target" != "$PWD" ]; then
+        builtin cd -- "$target"
+    fi
+}

@@ -1,15 +1,20 @@
 # dirhop — fish integration.
 # Source this file from config.fish. The `dho` binary must be on PATH.
 #
-# `read -z` keeps the NUL-terminated path, including embedded newlines.
-# Quitting produces no output, `read` fails, and the function returns
-# without changing directory.
+# `dho -0` ends the path with NUL and `read -z` keeps it whole, embedded
+# newlines included. Quitting writes nothing, `read` fails, and the function
+# returns without changing directory.
 
-function dho --description "Interactive directory change"
+function dho --description "Browse directories and cd into the chosen one"
+    switch "$argv[1]"
+        case -h --help -V --version
+            command dho $argv
+            return
+    end
     set -l target ""
-    command dho "$PWD" </dev/tty | read -z target
+    command dho -0 $argv | read -z target
     or return
-    if test -n "$target"
+    if test -n "$target"; and test "$target" != "$PWD"
         builtin cd -- "$target"
     end
 end

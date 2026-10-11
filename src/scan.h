@@ -15,8 +15,8 @@ typedef struct DirList {
     size_t count;
 } DirList;
 
-/* Fills list with directories and directory symlinks, sorted
-   alphabetically. Hidden names are included and flagged. Returns 0,
+/* Fills list with directories and directory symlinks, in natural
+   case-insensitive order. Hidden names are included and flagged. Returns 0,
    or -1 with errno set. */
 int scan_directories(const char *path, DirList *out);
 void scan_free(DirList *list);
