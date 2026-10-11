@@ -15,7 +15,7 @@ A tiny directory navigator for the terminal. It lists folders, you move with the
  ← Back     H Hidden     Q Quit
 ```
 
-Only directories are shown. There is no configuration and nothing is saved between launches.
+Only directories are shown. There is no configuration file and nothing is saved between launches, apart from remembering a declined setup prompt.
 
 ## Build
 
@@ -39,7 +39,16 @@ The stripped dynamic binary is meant to stay under 30 KB. It is about 23 KB on x
 
 A child process cannot change its parent's directory, so `dho` is a shell function. It runs the binary, reads the chosen path, and `cd`s only after you confirm. Arguments pass through, so `dho ~/src` starts there.
 
-Bash or zsh, in `~/.bashrc` or `~/.zshrc`:
+The first time you run `dho` without the function loaded, it offers to set it up:
+
+```
+dho needs a small shell function to change directory. Without it, dho only prints the path.
+Add it to ~/.bashrc? [Y/n]
+```
+
+Yes appends one guarded line, then you open a new terminal or `source` the file it names. dho works out the shell from the process that ran it: bash gets `~/.bashrc`, zsh gets `${ZDOTDIR:-~}/.zshrc`, and fish gets `~/.config/fish/conf.d/dirhop.fish`. The line is never added twice, and it does nothing if dirhop is later uninstalled. No is remembered in `${XDG_STATE_HOME:-~/.local/state}/dirhop/setup-declined`, and `dho --setup` adds the line later without asking. The prompt only appears when stdin, stdout and stderr are all a terminal, so scripts and pipes never see it.
+
+To set it up by hand instead, for bash or zsh, in `~/.bashrc` or `~/.zshrc`:
 
 ```sh
 source ~/.local/share/dirhop/dirhop.bash
@@ -97,7 +106,9 @@ The process exits 0 after a confirmed path. `q` and Esc exit 1 and Ctrl-C exits 
 
 ```
 usage: dho [-0] [directory]
+       dho --setup
   -0, --print0   end the path with NUL instead of a newline
+      --setup    add the shell function to your shell's startup file
   -h, --help     show this help
   -V, --version  show the version
 ```
@@ -108,7 +119,7 @@ Names with spaces are ordinary arguments. The shell function passes the path as 
 
 ## Scope
 
-Version 0.2.0 is keyboard navigation (including paging and jumps), directory listing in natural order, the hidden toggle, scrolling, shell integration, and basic errors (empty folders, permissions, names with spaces or newlines).
+Version 0.2.1 is keyboard navigation (including paging and jumps), directory listing in natural order, the hidden toggle, scrolling, shell integration with first-run setup, and basic errors (empty folders, permissions, names with spaces or newlines).
 
 It does not manage files, search, bookmark, preview, use the mouse, read a config file, keep history, or load plugins.
 
@@ -124,6 +135,7 @@ dirhop/
 │   ├── scan.c       directory listing
 │   ├── path.c       logical paths
 │   ├── output.c     path written on Enter
+│   ├── setup.c      first-run shell setup
 │   └── util.c
 ├── shell/
 │   ├── dirhop.bash

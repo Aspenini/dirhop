@@ -7,7 +7,7 @@
 
 function dho --description "Browse directories and cd into the chosen one"
     switch "$argv[1]"
-        case -h --help -V --version
+        case -h --help -V --version --setup
             command dho $argv
             return
     end

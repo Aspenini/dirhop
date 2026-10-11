@@ -1,5 +1,5 @@
 set_project("dirhop")
-set_version("0.2.0")
+set_version("0.2.1")
 set_languages("c11")
 set_warnings("all", "extra")
 set_optimize("smallest")

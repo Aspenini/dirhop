@@ -11,6 +11,6 @@
 /* Package and on-screen name. The executable and shell command are dho. */
 #define DIRHOP_NAME "dirhop"
 #define DIRHOP_BIN "dho"
-#define DIRHOP_VERSION "0.2.0"
+#define DIRHOP_VERSION "0.2.1"
 
 #endif

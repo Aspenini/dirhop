@@ -3,6 +3,7 @@
 #include "nav.h"
 #include "output.h"
 #include "path.h"
+#include "setup.h"
 #include "term.h"
 #include "ui.h"
 
@@ -35,11 +36,13 @@ static void usage(FILE *f)
 {
     fprintf(f,
             "usage: " DIRHOP_BIN " [-0] [directory]\n"
+            "       " DIRHOP_BIN " --setup\n"
             "\n"
             "Browse directories on the terminal and print the chosen one.\n"
             "Source the shell function so that Enter changes directory.\n"
             "\n"
             "  -0, --print0   end the path with NUL instead of a newline\n"
+            "      --setup    add the shell function to your shell's startup file\n"
             "  -h, --help     show this help\n"
             "  -V, --version  show the version\n");
 }
@@ -169,6 +172,8 @@ int main(int argc, char **argv)
                 opts_done = 1;
             } else if (strcmp(a, "-0") == 0 || strcmp(a, "--print0") == 0) {
                 print0 = 1;
+            } else if (strcmp(a, "--setup") == 0) {
+                return setup_run();
             } else if (strcmp(a, "-h") == 0 || strcmp(a, "--help") == 0) {
                 usage(stdout);
                 return 0;
@@ -188,6 +193,11 @@ int main(int argc, char **argv)
         }
         arg = a;
     }
+
+    /* Run bare on a terminal, nothing captures the path and the shell will
+       not change directory. Offer to fix that once. */
+    if (setup_offer())
+        return 0;
 
     browser_init(&app);
     atexit(cleanup);

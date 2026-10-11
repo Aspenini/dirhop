@@ -12,7 +12,7 @@ dho() {
     [ -n "${ZSH_VERSION-}" ] && emulate -L zsh
     local target
     case ${1-} in
-        -h | --help | -V | --version)
+        -h | --help | -V | --version | --setup)
             command dho "$@"
             return
             ;;
